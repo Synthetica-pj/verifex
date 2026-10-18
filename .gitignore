@@ -23,6 +23,10 @@ web app/backend/Custom dataset/
 *.log
 logs/
 
+# ---- Local tooling state (contains auth tokens) ----
+.ghconfig/
+.vercel/
+
 # ---- OS / editor ----
 .DS_Store
 Thumbs.db
