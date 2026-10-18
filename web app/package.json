@@ -1,0 +1,19 @@
+{
+  "name": "verifex-updated-verson",
+  "version": "1.0.0",
+  "description": "Verifex is a deepfake detector that uses a trained **Xception** model to identify real vs. fake images.",
+  "main": "index.js",
+  "dependencies": {
+    "convex": "^1.47.0",
+    "prettier": "^3.8.2"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}

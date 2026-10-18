@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Verifex — Forensic Sandbox</title>
+  <link rel="icon" type="image/png" href="/assets/verifex-logo-brand.png" />
+  <link rel="stylesheet" href="/styles.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+  <script src="https://d3js.org/d3.v7.min.js"></script>
+  <!-- 🔥 ADD: Preconnect for performance -->
+  <link rel="preconnect" href="https://cdnjs.cloudflare.com" />
+</head>
+<body data-page="dashboard">
+  <div class="page-loader" id="pageLoader">
+    <div class="loader-spinner"></div>
+    <div class="loader-text">Loading Workspace...</div>
+  </div>
+  <canvas id="canvas-bg"></canvas>
+  <canvas id="neural-canvas" style="position: fixed; top: 0; left: 0; width: 100%; height: 100%; z-index: -1; pointer-events: none; opacity: 0.4;"></canvas>
+  
+  <nav class="nav">
+    <div class="wrap-full nav-inner">
+      <a class="brand" href="/">
+        <img src="/assets/verifex-logo-brand.png" alt="Verifex Logo" class="brand-logo" />
+        <div class="brand-name">Verifex</div>
+      </a>
+      <button class="menu-toggle" id="menuToggle" aria-label="Toggle menu">
+        <span></span>
+        <span></span>
+        <span></span>
+      </button>
+      <div class="nav-links" id="navLinks">
+        <a class="nav-link" href="/#technology">Technology</a>
+        <a class="nav-link" href="/#faqs">FAQs</a>
+        <!-- Mobile Only Auth Links -->
+        <div class="nav-mobile-auth">
+          <!-- 🔥 FIX: Added mobile-signup class for app.js compatibility -->
+          <button class="mobile-login mobile-signup" onclick="logout()" style="display: none;">Logout</button>
+        </div>
+      </div>
+      <div class="nav-actions">
+        <button class="theme-toggle" id="themeToggle" title="Toggle Theme" aria-label="Toggle theme">
+          <svg class="sun-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
+          <svg class="moon-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+        </button>
+        <div class="user-profile" id="userProfile" style="display: none;">V</div>
+        <a href="/login.html" class="btn auth-btn" id="navLoginBtn" style="display: none;">Login</a>
+        <a href="/signup.html" class="btn btn-primary auth-btn" id="navSignupBtn" style="display: none;">Signup</a>
+        <button class="btn btn-nav-primary auth-btn" id="navLogoutBtn" onclick="logout()" style="display: none;" aria-label="Logout">
+          <span class="btn-text">Logout</span>
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5" class="btn-icon-only-mobile" style="display: none;" aria-hidden="true">
+            <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+  </nav>
+
+  <!-- 🔥 ADD: Error toast container for API errors -->
+  <div id="errorToast" class="error-toast" style="display: none; position: fixed; top: 100px; right: 20px; background: rgba(244, 63, 94, 0.9); color: white; padding: 16px 24px; border-radius: 12px; z-index: 1000; backdrop-filter: blur(10px); box-shadow: 0 10px 40px rgba(0,0,0,0.3); max-width: 400px;">
+    <div style="display: flex; align-items: center; gap: 12px;">
+      <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>
+      <span id="errorToastMessage">Error message</span>
+    </div>
+  </div>
+
+  <div class="dashboard-container">
+    <div class="wrap-full dashboard-shell">
+      <div class="dashboard-history-toolbar">
+        <button class="dashboard-history-toggle" id="historyToggleBtn" type="button" aria-expanded="true" aria-label="Toggle History">
+          <span class="dashboard-history-toggle-arrow" aria-hidden="true" style="font-size: 1.5rem;">➔</span>
+        </button>
+      </div>
+
+      <!-- Sidebar: History Sandbox -->
+      <aside class="dashboard-sidebar" id="dashboardSidebar">
+        <div class="sidebar-header" style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 16px;">
+          <div>
+            <h2 class="sidebar-title">Forensic History</h2>
+            <span class="history-count" id="historyCount">0 Scans</span>
+          </div>
+          <div style="display: flex; gap: 8px;">
+            <button class="btn" id="clearHistoryBtn" title="Clear History" style="background: rgba(244, 63, 94, 0.1); border-color: rgba(244, 63, 94, 0.2); color: #fb7185; padding: 0; width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; border-radius: 8px;" aria-label="Clear history">
+              <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true">
+                <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+              </svg>
+            </button>
+            <button class="btn" id="closeHistoryBtn" title="Close History" style="background: rgba(255, 255, 255, 0.1); border-color: rgba(255, 255, 255, 0.2); color: var(--text-primary); padding: 0; width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; border-radius: 8px;" aria-label="Close history">
+              <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true">
+                <path d="M18 6L6 18M6 6l12 12"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+        <div class="history-list-container" id="historyList">
+          <!-- History items injected here -->
+        </div>
+      </aside>
+
+      <!-- Main: Analysis Sandbox -->
+      <main class="dashboard-main">
+        <div id="emptyState" class="glass-card empty-state">
+          <div class="empty-icon">
+            <svg viewBox="0 0 24 24" width="64" height="64" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true">
+              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12"/>
+            </svg>
+          </div>
+          <h2>Ready for Analysis</h2>
+          <div class="empty-state-content" style="display: flex; flex-direction: column; align-items: center; gap: 16px;">
+            <p class="empty-state-text" style="color: var(--text-secondary);">Upload a forensic payload to initialize the neural inference engine.</p>
+            <label class="btn btn-primary" for="emptyStateFile">Browse Local Files</label>
+            <input type="file" id="emptyStateFile" style="display: none;" accept="image/png, image/jpeg" />
+          </div>
+        </div>
+
+        <div id="analysisContent" style="display: none;">
+          <div class="analysis-grid">
+            <!-- Side-by-Side Comparison -->
+            <div class="glass-card">
+              <div class="card-label">Forensic Comparison</div>
+              <div class="comparison-grid">
+                <div class="image-box">
+                  <span class="image-label">Original</span>
+                  <!-- 🔥 FIX: Added placeholder to prevent broken image icon -->
+                  <div class="image-placeholder" style="width: 100%; height: 100%; background: rgba(0,0,0,0.2); display: flex; align-items: center; justify-content: center; color: var(--text-secondary);">
+                    <span>Loading...</span>
+                  </div>
+                  <img id="originalImg" src="" alt="Original Payload" style="display: none;" onload="this.style.display='block'; this.previousElementSibling.style.display='none';" onerror="this.style.display='none'; this.previousElementSibling.style.display='flex'; this.previousElementSibling.innerHTML='<span>Error loading image</span>';" />
+                </div>
+                <div class="image-box forensic-view" style="position: relative;">
+                  <div class="image-label">Payload Heatmap</div>
+                  <!-- 🔥 FIX: Added placeholder here too -->
+                  <div class="image-placeholder" style="width: 100%; height: 100%; background: rgba(0,0,0,0.2); display: flex; align-items: center; justify-content: center; color: var(--text-secondary); position: absolute; top: 0; left: 0; z-index: 1;">
+                    <span>Waiting for analysis...</span>
+                  </div>
+                  <img id="currentImg" src="" alt="Neural Analysis Output" style="position: relative; z-index: 2; display: none;" onload="this.style.display='block'; this.previousElementSibling.style.display='none';" onerror="this.style.display='none'; this.previousElementSibling.style.display='flex'; this.previousElementSibling.innerHTML='<span>Error loading heatmap</span>';" />
+                  
+                  <!-- 🔥 FIX: Better overlay structure with z-index -->
+                  <div class="scan-loader" id="scanLoader" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 10; ">
+                    <div class="image-loader-container" id="imageLoader">
+                      <div class="image-spinner">
+                        <div class="scan-percentage" id="scanPercentage">0%</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Inference Data Row -->
+            <div class="analysis-data-row">
+              <div class="glass-card result-summary">
+                <div class="card-label">Inference Status</div>
+                <div id="statusChip" class="status-badge">AWAITING</div>
+                <h2 id="resultLabel" class="result-headline" style="font-size: 2.2rem; font-weight: 900; margin: 16px 0 24px;">INITIALIZING...</h2>
+                
+                <div class="progress-container">
+                  <div class="progress-track" style="height: 8px; background: rgba(255, 255, 255, 0.05); border-radius: 100px; overflow: hidden; margin-bottom: 16px;">
+                    <div id="indicatorBar" class="progress-fill" style="height: 100%; background: var(--accent-color); transition: width 0.5s ease; width: 0%;"></div>
+                  </div>
+                  <div class="progress-labels">
+                    <span id="confidenceChip">Confidence: 0%</span>
+                    <span id="modelChip">Engine: Xception</span>
+                  </div>
+                </div>
+              </div>
+
+              <div class="glass-card metadata-card">
+                <div class="card-label">Forensic Metadata</div>
+                <div class="meta-grid">
+                  <div class="meta-item">
+                    <span class="meta-key">Filename</span>
+                    <span class="meta-val" id="currentMeta">analysis_01.jpg</span>
+                  </div>
+                  <div class="meta-item">
+                    <span class="meta-key">Scan ID</span>
+                    <span class="meta-val" id="scanId">#SYN-8821</span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="glass-card explanation-card" id="neuralExplanationCard" style="display: none; flex-direction: column; justify-content: space-between; gap: 24px;">
+              <div>
+                <div class="card-label">Neural Explanation</div>
+                
+                <!-- Error Message Container (Hidden by default) -->
+                <div id="explanationError" style="display: none; padding: 32px; background: rgba(244, 63, 94, 0.1); border: 1px solid rgba(244, 63, 94, 0.2); border-radius: 12px; margin-bottom: 24px; text-align: center;">
+                  <div style="color: #fb7185; margin-bottom: 12px;">
+                    <svg viewBox="0 0 24 24" width="48" height="48" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/></svg>
+                  </div>
+                  <h3 style="color: var(--text-primary); margin-bottom: 8px;">Analysis Failed</h3>
+                  <p id="explanationErrorMessage" style="color: var(--text-secondary); line-height: 1.5; margin-bottom: 24px;"></p>
+                  <label class="btn btn-primary" for="newFile" style="padding: 10px 20px; cursor: pointer;">
+                    <span>Try New Image</span>
+                  </label>
+                </div>
+
+                <div class="explanation-methods-grid" id="explanationMethodsGrid">
+                  <div class="explanation-method-card" id="modelCard">
+                    <div class="explanation-method-title">Neural Confidence</div>
+                    <div id="model-gauge-v2" class="d3-signal-container loading-shimmer"></div>
+                    <div class="explanation-method-text" id="modelText"></div>
+                  </div>
+
+                  <div class="explanation-method-card" id="freqCard">
+                    <div class="explanation-method-title">Frequency Analysis</div>
+                    <div id="freq-spectrum" class="d3-signal-container loading-shimmer"></div>
+                    <div class="explanation-method-text" id="freqText"></div>
+                  </div>
+
+                  <div class="explanation-method-card" id="edgeCard">
+                    <div class="explanation-method-title">Edge Consistency</div>
+                    <div id="edge-radial" class="d3-signal-container loading-shimmer"></div>
+                    <div class="explanation-method-text" id="edgeText"></div>
+                  </div>
+
+                  <div class="explanation-method-card" id="noiseCard">
+                    <div class="explanation-method-title">Noise Distribution</div>
+                    <div id="noise-distribution" class="d3-signal-container loading-shimmer"></div>
+                    <div class="explanation-method-text" id="noiseText"></div>
+                  </div>
+                </div>
+              </div>
+              
+              <div style="display: flex; justify-content: flex-end;">
+                <label class="btn btn-primary" for="newFile" title="Initialize Scan" style="padding: 12px 24px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; cursor: pointer;">
+                  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.5" aria-hidden="true">
+                    <path d="M12 5v14M5 12h14"/>
+                  </svg>
+                  <span>New Upload</span>
+                </label>
+                <input type="file" id="newFile" style="display: none;" accept="image/png, image/jpeg" />
+              </div>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+  </div>
+
+  <footer class="footer">
+    <div class="wrap-full footer-content">
+      <p>&copy; 2026 Verifex Forensic Labs</p>
+      <p>Forensic Inference v2.4.0</p>
+    </div>
+  </footer>
+
+  <!-- 🔥 DELETE HISTORY MODAL -->
+  <div class="delete-history-modal" id="deleteHistoryModal" style="display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: rgba(0, 0, 0, 0.7); backdrop-filter: blur(4px); z-index: 2000; align-items: center; justify-content: center;">
+    <div class="delete-modal-content" style="background: var(--bg-secondary); border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 16px; padding: 32px; max-width: 500px; width: 90%; max-height: 70vh; overflow-y: auto; box-shadow: 0 20px 60px rgba(0, 0, 0, 0.4);">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px;">
+        <h2 style="margin: 0; font-size: 1.5rem; font-weight: 700; color: var(--text-primary);">Delete History Items</h2>
+        <button id="closeDeleteModal" style="background: none; border: none; color: var(--text-secondary); font-size: 24px; cursor: pointer; padding: 0; width: 32px; height: 32px; display: flex; align-items: center; justify-content: center;">×</button>
+      </div>
+
+      <p style="color: var(--text-secondary); margin-bottom: 16px; font-size: 0.9rem;">Once reached the limit of 10 saved scans. The app will be unable to take in more images, please delete one or more previous results from your History. This action cannot be undone.</p>
+
+      <!-- Select All Checkbox -->
+      <div style="display: flex; align-items: center; gap: 12px; margin-bottom: 20px; padding-bottom: 16px; border-bottom: 1px solid rgba(255, 255, 255, 0.05);">
+        <input type="checkbox" id="selectAllCheckbox" style="width: 18px; height: 18px; cursor: pointer;">
+        <label for="selectAllCheckbox" style="cursor: pointer; color: var(--text-primary); font-weight: 500;">Select All</label>
+      </div>
+
+      <!-- History Items List -->
+      <div id="deleteHistoryList" style="display: flex; flex-direction: column; gap: 12px; margin-bottom: 24px;">
+        <!-- Items will be injected here -->
+      </div>
+
+      <!-- Action Buttons -->
+      <div style="display: flex; gap: 12px; justify-content: flex-end;">
+        <button id="cancelDeleteBtn" style="padding: 10px 20px; background: rgba(255, 255, 255, 0.1); border: 1px solid rgba(255, 255, 255, 0.2); color: var(--text-primary); border-radius: 8px; cursor: pointer; font-weight: 500;">Cancel</button>
+        <button id="confirmDeleteBtn" style="padding: 10px 20px; background: rgba(244, 63, 94, 0.9); border: 1px solid rgba(244, 63, 94, 1); color: white; border-radius: 8px; cursor: pointer; font-weight: 500;">Delete Selected</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="portal" id="portal"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

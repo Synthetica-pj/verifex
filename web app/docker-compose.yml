@@ -1,0 +1,29 @@
+version: '3.8'
+
+services:
+  verifex-app:
+    build: .
+    container_name: verifex-ai-engine
+    restart: always
+    ports:
+      # The app runs on port 8501 inside the container.
+      # Nginx will proxy requests to this port.
+      - "127.0.0.1:8501:8501"
+    environment:
+      # These will be populated from your local .env file
+      - CONVEX_URL=${CONVEX_URL}
+      - CLERK_PUBLISHABLE_KEY=${CLERK_PUBLISHABLE_KEY}
+      - HIDDEN_TIER_API_KEY=${HIDDEN_TIER_API_KEY}
+      - HIDDEN_TIER_API_ENDPOINT=${HIDDEN_TIER_API_ENDPOINT}
+      - HIDDEN_TIER_API_AUTH_MODE=${HIDDEN_TIER_API_AUTH_MODE}
+      - TF_ENABLE_ONEDNN_OPTS=0
+      - TF_CPP_MIN_LOG_LEVEL=2
+    volumes:
+      # Persistent storage for logs or uploaded files if needed
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
