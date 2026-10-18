@@ -1151,6 +1151,9 @@ async function predictFromDataUrl(dataUrl, filename) {
 }
 
 function initDashboard() {
+  // 🔥 Optimization: Ping backend health on load to wake up Render (cold start)
+  fetch('/health').then(r => r.json()).then(d => console.log("[Backend] Awake:", d.version)).catch(() => {});
+
   if (!localStorage.getItem("verifex.user")) {
     window.location.href = "/login.html";
     return;

@@ -669,10 +669,11 @@ def _generate_heatmap(model, img_array, original_image_np, prediction_label):
         else: 
             conv_model = tf.keras.Model(model.inputs, model.get_layer(target_layer_name).output) 
         
-        # 3. Run True Score-CAM Math 
+        # 3. Run Optimized Score-CAM Math 
         activations = conv_model(img_array).numpy()[0] 
         variances = np.var(activations, axis=(0, 1)) 
-        max_n = min(32, len(variances)) 
+        # Reduction: Use 12 channels instead of 32 to fit within Vercel's 10s timeout
+        max_n = min(12, len(variances)) 
         top_k_indices = np.argsort(variances)[-max_n:] 
         input_shape = img_array.shape[1:3] 
         masked_images = [] 
@@ -684,7 +685,8 @@ def _generate_heatmap(model, img_array, original_image_np, prediction_label):
             upsampled = cv2.resize(norm_map, (input_shape[1], input_shape[0])) 
             masked_images.append(img_array[0] * np.expand_dims(upsampled, axis=-1)) 
             
-        preds = model.predict(np.array(masked_images), batch_size=16, verbose=0) 
+        # Predict all masks in a single batch
+        preds = model.predict(np.array(masked_images), batch_size=max_n, verbose=0) 
         scores = np.exp(1.0 - preds[:, 0]) / np.sum(np.exp(1.0 - preds[:, 0])) 
         heatmap = np.zeros(activations.shape[0:2], dtype=np.float32) 
         
@@ -734,6 +736,67 @@ def _parse_uploaded_file(content_type, body):
             if payload: 
                 return filename, payload 
     raise RuntimeError("No uploaded file found in form data") 
+
+def _bg_upload_to_convex(user_id, scan_id, result, file_bytes):
+    """Background task to upload images and metadata to Convex without blocking the HTTP response."""
+    if not convex_client or not user_id or user_id == "anonymous":
+        return
+
+    try:
+        print(f"[Convex] Starting background upload for {scan_id}")
+        # 1. Get Upload URLs from Convex
+        upload_url_image = convex_client.mutation("scans:generateUploadUrl")
+        upload_url_original = convex_client.mutation("scans:generateUploadUrl")
+        upload_url_heatmap = convex_client.mutation("scans:generateUploadUrl")
+
+        # 2. Upload images to Convex File Storage
+        crop_bytes = base64.b64decode(result['crop_image'])
+        heatmap_bytes = base64.b64decode(result['heatmap'])
+        
+        if "originalImage" in result and result["originalImage"].startswith("data:"):
+             orig_base64 = result["originalImage"].split(",")[1]
+             original_bytes = base64.b64decode(orig_base64)
+        else:
+             original_bytes = file_bytes
+
+        # Perform POST uploads
+        res_img = requests.post(upload_url_image, data=crop_bytes, headers={"Content-Type": "image/jpeg"})
+        res_orig = requests.post(upload_url_original, data=original_bytes, headers={"Content-Type": "image/jpeg"})
+        res_heat = requests.post(upload_url_heatmap, data=heatmap_bytes, headers={"Content-Type": "image/jpeg"})
+        
+        storage_id_image = res_img.json()["storageId"]
+        storage_id_original = res_orig.json()["storageId"]
+        storage_id_heatmap = res_heat.json()["storageId"]
+
+        # 3. Strip large redundant fields
+        clean_details = result.copy()
+        for key in ["heatmap", "crop_image", "originalImage", "explanation"]:
+            if key in clean_details:
+                del clean_details[key]
+        
+        # 4. Create Scan record
+        convex_client.mutation("scans:createScan", {
+            "userId": user_id,
+            "scanId": scan_id,
+            "image": None,
+            "originalImage": None,
+            "imageStorageId": storage_id_image,
+            "originalImageStorageId": storage_id_original,
+            "heatmapStorageId": storage_id_heatmap,
+            "prediction": result["prediction"],
+            "confidence": float(result["confidence"]),
+            "details": clean_details,
+            "timestamp": str(time.time()),
+            "auditLog": (
+                f"=== SYSTEM AUDIT LOG ===\n"
+                f"{result.get('details', {}).get('audit_log', '')}\n\n"
+                f"forensic_profiles: {json.dumps({**result.get('forensic_profiles', {}), **{k:v for k,v in result.get('details', {}).items() if k != 'audit_log'}}, indent=2)}\n\n"
+                f"variances: {json.dumps(result.get('visual_data', {}).get('variances', {}), indent=2)}"
+            )
+        })
+        print(f"[Convex] Background upload complete for {scan_id}")
+    except Exception as e:
+        print(f"[Convex Error] {e}")
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "VerifexHTTP/4.0-Integrated"
@@ -973,64 +1036,15 @@ class Handler(BaseHTTPRequestHandler):
             scan_id = "scan_" + str(uuid.uuid4())
             result["scan_id"] = scan_id
             
+            # 🔥 Optimization: Move Convex uploads to background thread
+            # This prevents 502 Bad Gateway timeouts on Vercel/Render by sending the 
+            # detection result immediately while database logging happens in the background.
             if convex_client and user_id and user_id != "anonymous":
-                try:
-                    # 1. Get Upload URLs from Convex
-                    upload_url_image = convex_client.mutation("scans:generateUploadUrl")
-                    upload_url_original = convex_client.mutation("scans:generateUploadUrl")
-                    upload_url_heatmap = convex_client.mutation("scans:generateUploadUrl")
-
-                    # 2. Upload images to Convex File Storage
-                    # Convert images to bytes
-                    crop_bytes = base64.b64decode(result['crop_image'])
-                    heatmap_bytes = base64.b64decode(result['heatmap'])
-                    
-                    # Original image bytes
-                    if "originalImage" in result and result["originalImage"].startswith("data:"):
-                         # Remove data:image/jpeg;base64, prefix
-                         orig_base64 = result["originalImage"].split(",")[1]
-                         original_bytes = base64.b64decode(orig_base64)
-                    else:
-                         original_bytes = file_bytes
-
-                    # Perform POST uploads
-                    res_img = requests.post(upload_url_image, data=crop_bytes, headers={"Content-Type": "image/jpeg"})
-                    res_orig = requests.post(upload_url_original, data=original_bytes, headers={"Content-Type": "image/jpeg"})
-                    res_heat = requests.post(upload_url_heatmap, data=heatmap_bytes, headers={"Content-Type": "image/jpeg"})
-                    
-                    storage_id_image = res_img.json()["storageId"]
-                    storage_id_original = res_orig.json()["storageId"]
-                    storage_id_heatmap = res_heat.json()["storageId"]
-
-                    # 3. Strip large redundant fields from result before saving as 'details'
-                    # We create a copy to avoid modifying the result sent to the client
-                    clean_details = result.copy()
-                    for key in ["heatmap", "crop_image", "originalImage", "explanation"]:
-                        if key in clean_details:
-                            del clean_details[key]
-                    
-                    # 4. Create Scan record with storageIds and slim details
-                    convex_client.mutation("scans:createScan", {
-                        "userId": user_id,
-                        "scanId": scan_id,
-                        "image": None, # Removed to stay under 1MB limit
-                        "originalImage": None, # Removed to stay under 1MB limit
-                        "imageStorageId": storage_id_image,
-                        "originalImageStorageId": storage_id_original,
-                        "heatmapStorageId": storage_id_heatmap,
-                        "prediction": result["prediction"],
-                        "confidence": float(result["confidence"]),
-                        "details": clean_details,
-                        "timestamp": str(time.time()),
-                        "auditLog": (
-                            f"=== SYSTEM AUDIT LOG ===\n"
-                            f"{result.get('details', {}).get('audit_log', '')}\n\n"
-                            f"forensic_profiles: {json.dumps({**result.get('forensic_profiles', {}), **{k:v for k,v in result.get('details', {}).items() if k != 'audit_log'}}, indent=2)}\n\n"
-                            f"variances: {json.dumps(result.get('visual_data', {}).get('variances', {}), indent=2)}"
-                        )
-                    })
-                except Exception as e:
-                    print(f"[Convex Error] {e}")
+                threading.Thread(
+                    target=_bg_upload_to_convex, 
+                    args=(user_id, scan_id, result, file_bytes),
+                    daemon=True
+                ).start()
 
             self._send_json(result)
         except Exception as exc:
@@ -1053,8 +1067,10 @@ def _warmup_runtime():
 
 def main():
     WEB_DIR.mkdir(exist_ok=True)
-    port = 8501
-    # Bind to 0.0.0.0 to allow external access via VPS
+    # Respect Render's $PORT environment variable, fallback to 8501 for local dev
+    port = int(os.environ.get("PORT", 8501))
+    
+    # Bind to 0.0.0.0 to allow external access (VPS/Docker/Render)
     httpd = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print("=" * 60)
     print("⚖️ Verifex v4.0 - Production VPS Deployment")
