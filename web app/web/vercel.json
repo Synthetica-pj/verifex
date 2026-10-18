@@ -1,4 +1,18 @@
 {
   "cleanUrls": true,
-  "trailingSlash": false
+  "trailingSlash": false,
+  "rewrites": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://verifex-qwqw.onrender.com/api/:path*"
+    },
+    {
+      "source": "/predict",
+      "destination": "https://verifex-qwqw.onrender.com/predict"
+    },
+    {
+        "source": "/health",
+        "destination": "https://verifex-qwqw.onrender.com/health"
+    }
+  ]
 }
