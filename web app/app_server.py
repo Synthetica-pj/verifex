@@ -469,10 +469,6 @@ def predict_from_bytes(file_bytes):
     preds = model.predict(batch, verbose=0)
     real_p = float(np.mean(preds[:, 0]))
     fake_p = 1.0 - real_p
-    
-    # Debug print to server logs for accuracy monitoring
-    print(f"[Model Accuracy Debug] Filename: {audit_log[0]} | Mean Real Prob: {real_p:.4f} | Mean Fake Prob: {fake_p:.4f}")
-    
     audit_log.append(f"[TIER 2] AI Structural Analysis complete ({fake_p:.1%} suspect).")
 
     # --- ENSEMBLE SCORING ---
@@ -641,26 +637,24 @@ def _generate_heatmap(model, img_array, original_image_np, prediction_label):
     import cv2 
     import numpy as np 
 
-    # RULE: Generate heatmap for ALL images to provide neural explanation
-    # (Removed the "Authentic = original image" shortcut to help diagnose model issues)
+    # RULE: If the image is Real, immediately return the untouched original photo 
+    if prediction_label != "Fake": 
+        return original_image_np.astype(np.uint8) 
 
     try: 
         # 1. Dynamically find the nested base model (like Russian nesting dolls) 
         base_model = None 
-        # Try to find a layer that is a model itself (common in Xception implementations)
         for layer in model.layers: 
             if isinstance(layer, tf.keras.Model): 
                 base_model = layer 
                 break 
         
-        # If no nested model, use the main model layers
         layers_to_search = base_model.layers if base_model else model.layers 
         
-        # 2. Dynamically find the last 4D convolutional layer
+        # 2. Dynamically find the last convolutional layer (4D output) 
         target_layer_name = None 
         for layer in reversed(layers_to_search): 
             try: 
-                # Check for 4D output (batch, h, w, channels)
                 if len(layer.output.shape) == 4: 
                     target_layer_name = layer.name 
                     break 
@@ -668,18 +662,7 @@ def _generate_heatmap(model, img_array, original_image_np, prediction_label):
                 continue 
                 
         if not target_layer_name: 
-            # Fallback to a known Xception layer name if dynamic search fails
-            for name in ['block14_sepconv2_act', 'block14_sepconv2', 'conv2d_4']:
-                try:
-                    if base_model: base_model.get_layer(name)
-                    else: model.get_layer(name)
-                    target_layer_name = name
-                    break
-                except:
-                    continue
-
-        if not target_layer_name:
-            raise ValueError("No suitable convolutional layer found for Score-CAM.")
+            raise ValueError("No 4D convolutional layer found.") 
             
         if base_model: 
             conv_model = tf.keras.Model(base_model.inputs, base_model.get_layer(target_layer_name).output) 
@@ -704,16 +687,7 @@ def _generate_heatmap(model, img_array, original_image_np, prediction_label):
             
         # Predict all masks in a single batch
         preds = model.predict(np.array(masked_images), batch_size=max_n, verbose=0) 
-        
-        # Determine weights based on the verdict
-        # If Fake: focus on what makes it look Fake. If Real: focus on what makes it look Real.
-        if prediction_label == "Fake":
-            target_scores = 1.0 - preds[:, 0] # Fake probabilities
-        else:
-            target_scores = preds[:, 0]       # Real probabilities
-            
-        # Softmax to normalize weights
-        scores = np.exp(target_scores) / np.sum(np.exp(target_scores)) 
+        scores = np.exp(1.0 - preds[:, 0]) / np.sum(np.exp(1.0 - preds[:, 0])) 
         heatmap = np.zeros(activations.shape[0:2], dtype=np.float32) 
         
         for idx, channel_idx in enumerate(top_k_indices): 
@@ -722,7 +696,7 @@ def _generate_heatmap(model, img_array, original_image_np, prediction_label):
         heatmap = np.maximum(heatmap, 0) 
         heatmap = heatmap / (np.max(heatmap) + 1e-8) 
         
-        # 4. Resize and apply color mask (Red for Fake, Blue for Real)
+        # 4. Resize and apply Vivid Red Mask 
         h, w = original_image_np.shape[:2] 
         heatmap_resized = cv2.resize(heatmap, (w, h), interpolation=cv2.INTER_CUBIC) 
         heatmap_final = cv2.GaussianBlur(heatmap_resized, (15, 15), 0) 
@@ -730,10 +704,7 @@ def _generate_heatmap(model, img_array, original_image_np, prediction_label):
         hmap_3d = np.expand_dims(heatmap_final, axis=-1) 
         
         color_canvas = np.zeros_like(original_image_np) 
-        if prediction_label == "Fake":
-            color_canvas[:, :, 0] = 255  # Vivid Red (R channel)
-        else:
-            color_canvas[:, :, 2] = 255  # Deep Blue (B channel)
+        color_canvas[:, :, 0] = 255  # Vivid Red 
  
         overlay_alpha = np.clip(hmap_3d * 0.67, 0, 1.0) 
         super_img = (original_image_np * (1.0 - overlay_alpha) + color_canvas * overlay_alpha).astype(np.uint8) 

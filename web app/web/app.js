@@ -1202,9 +1202,6 @@ function initDashboard() {
     if (currentMeta) currentMeta.textContent = `${item.name || "analysis_payload"}`;
     // Show actual scan_id, fallback to id if not available
     if ($("scanId")) $("scanId").textContent = `${item.scan_id || item.id}`;
-    // LOGIC: Always show the Heatmap in the right box if it exists.
-    // If no heatmap, fallback to the crop image.
-    const resultImage = item.heatmap || item.image;
     if (currentImg) {
       const orig = currentImg;
       orig.style.display = "none";
@@ -1213,6 +1210,8 @@ function initDashboard() {
         orig.previousElementSibling.innerHTML = "<span>Loading...</span>";
       }
       
+      // LOGIC: Show Heatmap for FAKE, show forensic crop for REAL
+      const resultImage = item.prediction === "Fake" ? item.heatmap : item.image;
       orig.src = resultImage || ""; 
       orig.style.filter = "none";
     }
