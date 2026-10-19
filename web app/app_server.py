@@ -106,6 +106,10 @@ def _import_tensorflow():
     if not HAS_TENSORFLOW:
         return None
     import tensorflow as tf
+    # 🔥 Optimization: Limit CPU threads for Render Free tier (0.1 CPU)
+    # This prevents context switching overhead on extremely limited resources.
+    tf.config.threading.set_intra_op_parallelism_threads(1)
+    tf.config.threading.set_inter_op_parallelism_threads(1)
     return tf
 
 _model_cache = None
@@ -405,7 +409,20 @@ def predict_from_bytes(file_bytes):
     t_stage = time.time()
     valid_faces = []
     if face_detector:
-        faces = face_detector.detect_faces(full_img_array)
+        # 🔥 Optimization: Downscale image for MTCNN detection to save CPU/Time
+        # MTCNN is extremely slow on high-res images (0.1 CPU limit).
+        MAX_DETECTION_DIM = 640
+        h_orig, w_orig = full_img_array.shape[:2]
+        if max(h_orig, w_orig) > MAX_DETECTION_DIM:
+            scale = MAX_DETECTION_DIM / max(h_orig, w_orig)
+            small_img = cv2.resize(full_img_array, (int(w_orig * scale), int(h_orig * scale)))
+            faces = face_detector.detect_faces(small_img)
+            # Scale coordinates back to original size
+            for f in faces:
+                f['box'] = [int(coord / scale) for coord in f['box']]
+        else:
+            faces = face_detector.detect_faces(full_img_array)
+            
         valid_faces = [f for f in faces if f['confidence'] >= 0.75]
     _stage("MTCNN detect_faces", t_stage, f"{len(valid_faces)} face(s)")
 
@@ -718,7 +735,8 @@ def _generate_heatmap(model, img_array, original_image_np, prediction_label):
         # 3. Run True Score-CAM Math 
         activations = conv_model(img_array).numpy()[0] 
         variances = np.var(activations, axis=(0, 1)) 
-        max_n = min(32, len(variances)) 
+        # 🔥 Optimization: Reduce channels from 32 to 12 for faster inference on CPU
+        max_n = min(12, len(variances)) 
         top_k_indices = np.argsort(variances)[-max_n:] 
         input_shape = img_array.shape[1:3] 
         masked_images = [] 
@@ -730,7 +748,7 @@ def _generate_heatmap(model, img_array, original_image_np, prediction_label):
             upsampled = cv2.resize(norm_map, (input_shape[1], input_shape[0])) 
             masked_images.append(img_array[0] * np.expand_dims(upsampled, axis=-1)) 
                
-        # 🔥 Optimization: Process in smaller batches of 4 to avoid OOM on Render
+        # 🔥 Optimization: Process in larger batches of 8 if possible, but keep 4 for memory safety
         print(f"[PERF] Score-CAM: {len(masked_images)} masked channels @ {input_shape}, batch_size=4", flush=True)
         preds = model.predict(np.array(masked_images), batch_size=4, verbose=0) 
         scores = np.exp(1.0 - preds[:, 0]) / np.sum(np.exp(1.0 - preds[:, 0])) 
