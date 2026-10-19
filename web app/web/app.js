@@ -1477,7 +1477,8 @@ if (imgLoader) {
       neuralCard.style.display = "none";
     }
 
-    // 🔥 FIX: Try to get the original raw File from IndexedDB to preserve metadata
+    try {
+      // 🔥 FIX: Try to get the original raw File from IndexedDB to preserve metadata
       let originalFile = await getOriginalFile();
       
       // 🔥 Optimization: Resize image if it's too large (> 1MB) to prevent 502 timeouts
