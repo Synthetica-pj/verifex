@@ -25,6 +25,30 @@ import urllib.request
 import urllib.error
 
 try:
+    import resource  # Unix-only (present on Render); used for peak-memory logging
+except ImportError:
+    resource = None
+
+# ==========================================
+# PERFORMANCE INSTRUMENTATION
+# ==========================================
+def _peak_rss_mb():
+    """Peak resident memory of this process in MB (-1 when unavailable, e.g. Windows)."""
+    if resource is None:
+        return -1.0
+    try:
+        return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024.0
+    except Exception:
+        return -1.0
+
+def _stage(label, started_at, extra=""):
+    """Log elapsed time and peak memory for a pipeline stage, and return elapsed seconds."""
+    elapsed = time.time() - started_at
+    suffix = f" | {extra}" if extra else ""
+    print(f"[PERF] {label}: {elapsed * 1000:.0f} ms | peak RSS {_peak_rss_mb():.0f} MB{suffix}", flush=True)
+    return elapsed
+
+try:
     from convex import ConvexClient
     env_local_path = Path(__file__).parent / ".env.local"
     if env_local_path.exists():
@@ -72,8 +96,10 @@ def _import_tensorflow():
     global HAS_TENSORFLOW
     if HAS_TENSORFLOW is None:
         try:
+            t_import = time.time()
             import tensorflow  # noqa: F401
             HAS_TENSORFLOW = True
+            _stage("TensorFlow import", t_import)
         except ImportError as e:
             HAS_TENSORFLOW = False
             print(f"[Warning] TensorFlow not found ({e}). Switching to Inference Mock mode.")
@@ -92,8 +118,9 @@ def _load_model():
             import tensorflow as tf
             # Load the model. If it fails, we catch it in predict_from_bytes
             if MODEL_PATH.exists():
+                t_load = time.time()
                 _model_cache = tf.keras.models.load_model(MODEL_PATH)
-                print(f"[Model] Loaded {MODEL_PATH.name}")
+                _stage("Model load", t_load, MODEL_PATH.name)
             else:
                 print(f"[Warning] Model file not found at {MODEL_PATH}")
                 _model_cache = None
@@ -345,6 +372,8 @@ def _predict_mock(file_bytes, audit_log):
     }
 
 def predict_from_bytes(file_bytes):
+    t_total = time.time()
+    print(f"[PERF] ==== PREDICT START ==== upload {len(file_bytes) / 1024.0:.0f} KB | peak RSS {_peak_rss_mb():.0f} MB", flush=True)
     tf = _import_tensorflow()
     model = _load_model()
     face_detector = _load_mtcnn()
@@ -354,23 +383,31 @@ def predict_from_bytes(file_bytes):
     # If TensorFlow is missing, we use the "Inference Mock" engine
     if tf is None or model is None:
         audit_log.append("[SYSTEM] TensorFlow or Model not found. Falling back to Inference Mock engine.")
-        return _predict_mock(file_bytes, audit_log)
+        result = _predict_mock(file_bytes, audit_log)
+        _stage("TOTAL predict_from_bytes (MOCK)", t_total)
+        return result
     
     # --- TIER 1: SUPREME PRIORITY ---
+    t_stage = time.time()
     is_fake_1b, msg_1b = check_c2pa(file_bytes, audit_log)
     is_fake_1a, msg_1a = check_metadata(file_bytes, audit_log)
+    _stage("TIER1 metadata + C2PA", t_stage, f"c2pa={is_fake_1b} meta={is_fake_1a}")
 
     # --- IMAGE PREP ---
+    t_stage = time.time()
     image_pil = Image.open(io.BytesIO(file_bytes)).convert('RGB')
     # 1. Fix EXIF Orientation Before Processing
     image_pil = ImageOps.exif_transpose(image_pil)
     full_img_array = np.array(image_pil)
+    _stage("IMAGE decode", t_stage, f"{full_img_array.shape[1]}x{full_img_array.shape[0]} px")
 
     # --- MTCNN FACE DETECTION ---
+    t_stage = time.time()
     valid_faces = []
     if face_detector:
         faces = face_detector.detect_faces(full_img_array)
         valid_faces = [f for f in faces if f['confidence'] >= 0.75]
+    _stage("MTCNN detect_faces", t_stage, f"{len(valid_faces)} face(s)")
 
     is_anime = len(valid_faces) == 0
     is_tier1_fake = is_fake_1a or is_fake_1b
@@ -467,9 +504,11 @@ def predict_from_bytes(file_bytes):
         np.clip(crop_array * 1.1, 0, 255)
     ]))
     
+    t_stage = time.time()
     preds = model.predict(batch, verbose=0)
     real_p = float(np.mean(preds[:, 0]))
     fake_p = 1.0 - real_p
+    _stage("TIER2 Xception predict (TTA x3)", t_stage, f"fake_p={fake_p:.3f}")
     audit_log.append(f"[TIER 2] AI Structural Analysis complete ({fake_p:.1%} suspect).")
 
     # --- ENSEMBLE SCORING ---
@@ -585,7 +624,9 @@ def predict_from_bytes(file_bytes):
 
     # Generate heatmap overlaid on the cropped face image
     # We pass the preprocessed crop as img_array and the clean crop_np as the base for overlay
+    t_stage = time.time()
     heatmap = _generate_heatmap(model, np.expand_dims(batch[0], axis=0), crop_np, verdict_label)
+    _stage("Heatmap (Score-CAM)", t_stage, f"verdict={verdict_label}")
 
     # ===== CONFIDENCE SCORE EXPLANATION =====
     # The confidence value represents the CERTAINTY of the prediction, not just "realness":
@@ -602,6 +643,8 @@ def predict_from_bytes(file_bytes):
     #   - If ensemble_fake_p >= 0.50: verdict = "Fake"
     #   - If ensemble_fake_p < 0.50: verdict = "Real"
     # =========================================
+
+    _stage("TOTAL predict_from_bytes", t_total, f"verdict={verdict_label}")
 
     return {
         "prediction": verdict_label,
@@ -643,6 +686,7 @@ def _generate_heatmap(model, img_array, original_image_np, prediction_label):
     if prediction_label != "Fake": 
         return original_image_np.astype(np.uint8) 
 
+    t_cam = time.time()
     try: 
         # 1. Dynamically find the nested base model (like Russian nesting dolls) 
         base_model = None 
@@ -687,6 +731,7 @@ def _generate_heatmap(model, img_array, original_image_np, prediction_label):
             masked_images.append(img_array[0] * np.expand_dims(upsampled, axis=-1)) 
                
         # 🔥 Optimization: Process in smaller batches of 4 to avoid OOM on Render
+        print(f"[PERF] Score-CAM: {len(masked_images)} masked channels @ {input_shape}, batch_size=4", flush=True)
         preds = model.predict(np.array(masked_images), batch_size=4, verbose=0) 
         scores = np.exp(1.0 - preds[:, 0]) / np.sum(np.exp(1.0 - preds[:, 0])) 
         heatmap = np.zeros(activations.shape[0:2], dtype=np.float32) 
@@ -713,7 +758,8 @@ def _generate_heatmap(model, img_array, original_image_np, prediction_label):
         # Clean up memory explicitly
         del masked_images, activations, scores, heatmap, heatmap_resized, heatmap_final, color_canvas
         gc.collect()
-      
+
+        _stage("Score-CAM inner", t_cam, f"{max_n} channels at {input_shape}")
         return super_img 
  
     except Exception as e: 
@@ -1025,8 +1071,10 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
+            t_request = time.time()
             content_type = self.headers.get("Content-Type", "")
             body = self.rfile.read(content_length)
+            print(f"[PERF] /predict request received: {len(body) / 1024.0:.0f} KB body, {content_type}", flush=True)
             
             user_id = "anonymous"
             if b'name="userId"' in body:
@@ -1051,15 +1099,19 @@ class Handler(BaseHTTPRequestHandler):
                     daemon=True
                 ).start()
 
+            t_send = time.time()
             self._send_json(result)
+            print(f"[PERF] Response sent for {scan_id}: {time.time() - t_send:.0f} s serialize+write | request total {time.time() - t_request:.0f} s", flush=True)
         except Exception as exc:
             import traceback
             error_detail = traceback.format_exc()
             print(f"ERROR: {error_detail}")
+            print(f"[PERF] /predict FAILED after {time.time() - t_request:.0f} s", flush=True)
             self._send_json({"error": f"Detection failed: {str(exc)}"}, status=HTTPStatus.INTERNAL_SERVER_ERROR)
 
 def _warmup_runtime():
     """Load TensorFlow, the model and the face detector in the background."""
+    t_warmup = time.time()
     try:
         if _import_tensorflow() is None:
             print("[Warmup] TensorFlow unavailable - running in Inference Mock mode.")
@@ -1069,6 +1121,7 @@ def _warmup_runtime():
         print("[Warmup] Neural runtime ready.")
     except Exception as e:
         print(f"[Warmup] Failed to preload runtime: {e}")
+    _stage("Warmup total", t_warmup)
 
 def main():
     WEB_DIR.mkdir(exist_ok=True)
