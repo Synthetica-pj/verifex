@@ -35,6 +35,8 @@ os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'false'
 os.environ['TF_XLA_FLAGS'] = '--tf_xla_cpu_global_jit=false'
 os.environ['TF_NUM_INTRAOP_THREADS'] = '1'
 os.environ['TF_NUM_INTEROP_THREADS'] = '1'
+os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
+os.environ['PYTHONHASHSEED'] = '0'
 
 # Global toggle for the heavy Score-CAM heatmap
 # On 512MB RAM, Score-CAM is the #1 cause of crashes.
@@ -73,11 +75,6 @@ try:
     if CONVEX_URL:
         print(f"[Convex] Initializing client with URL: {CONVEX_URL}")
         convex_client = ConvexClient(CONVEX_URL)
-        try:
-            convex_client.query("scans:getHistory", {"userId": "test"})
-            print("[Convex] Client connection tested successfully")
-        except Exception as test_e:
-            print(f"[Convex] Connection test error (expected if 'test' is not valid Id): {test_e}")
     else:
         print("[Convex] Warning: CONVEX_URL not found. Database operations will be mocked.")
         convex_client = None
@@ -131,6 +128,13 @@ def _import_tensorflow(allow_block=True):
     # This prevents context switching overhead on extremely limited resources.
     tf.config.threading.set_intra_op_parallelism_threads(1)
     tf.config.threading.set_inter_op_parallelism_threads(1)
+    
+    # 🔥 Extra memory safety: Hide GPU from TF to prevent any CUDA/GPU memory allocation
+    try:
+        tf.config.set_visible_devices([], 'GPU')
+    except:
+        pass
+        
     return tf
 
 _model_cache = None
@@ -183,11 +187,6 @@ def _load_mtcnn():
             _mtcnn_cache = None
     return _mtcnn_cache
 
-class MockHiddenTier:
-    def analyze(self, file_bytes, log_list):
-        return {"status": "skipped", "error_code": "SKIPPED"}
-hidden_tier_analyzer = MockHiddenTier()
-
 def convert_to_python(obj):
     if isinstance(obj, np.integer):
         return int(obj)
@@ -210,23 +209,22 @@ def _sanitize_auth_error_message(e, mode):
 def check_metadata(file_bytes, log_list): 
     suspect_keywords = ['midjourney', 'dall-e', 'dalle', 'stable diffusion', 'openai', 'adobe firefly', 'trainedalgorithmicmedia', 'generative'] 
     try: 
-        img = Image.open(io.BytesIO(file_bytes)) 
-        
-        # 1. Check basic info & XMP data (Catches PNG metadata) 
-        for key, value in img.info.items(): 
-            val_str = str(value).lower() 
-            if any(word in val_str for word in suspect_keywords): 
-                log_list.append(f"[TIER 1a] AI signature detected in metadata: {key}") 
-                return True, f"Metadata Match: Found AI signature in {key}." 
-
-        exif = img.getexif() 
-        if exif: 
-            for tag, value in exif.items(): 
+        # 🔥 Optimization: Open image briefly and close immediately to save RAM
+        with Image.open(io.BytesIO(file_bytes)) as img:
+            # 1. Check basic info & XMP data (Catches PNG metadata) 
+            for key, value in img.info.items(): 
                 val_str = str(value).lower() 
                 if any(word in val_str for word in suspect_keywords): 
-                    log_list.append(f"[TIER 1a] AI signature detected in EXIF data.") 
-                    return True, "EXIF Match: AI Generator tag found." 
-
+                    log_list.append(f"[TIER 1a] AI signature detected in metadata: {key}") 
+                    return True, f"Metadata Match: Found AI signature in {key}." 
+    
+            exif = img.getexif() 
+            if exif: 
+                for tag, value in exif.items(): 
+                    val_str = str(value).lower() 
+                    if any(word in val_str for word in suspect_keywords): 
+                        log_list.append(f"[TIER 1a] AI signature detected in EXIF data.") 
+                        return True, "EXIF Match: AI Generator tag found." 
     except Exception as e: 
         log_list.append(f"Metadata Error: {str(e)}") 
     return False, "Clean" 
@@ -238,10 +236,9 @@ def check_c2pa(file_bytes, log_list):
         import c2pa 
         import json 
         
-        img = Image.open(io.BytesIO(file_bytes)) 
-        ext = img.format.lower() if img.format else "jpg" 
-        
-        with tempfile.NamedTemporaryFile(suffix=f".{ext}", delete=False) as tf:
+        # 🔥 Optimization: Skip PIL Image.open here. c2pa reader can detect format from bytes.
+        # We use a generic suffix since C2PA library handles the magic bytes.
+        with tempfile.NamedTemporaryFile(suffix=".tmp", delete=False) as tf:
             tf.write(file_bytes)
             temp_path = tf.name
             
@@ -477,37 +474,6 @@ def predict_from_bytes(file_bytes):
     is_anime = len(valid_faces) == 0
     is_tier1_fake = is_fake_1a or is_fake_1b
 
-    # --- DETERMINE IF WE SHOULD SKIP HIDDEN TIER API ---
-    # Skip API if: Tier 1 detected fake, no face found, or face too small
-    should_skip_api = is_tier1_fake or is_anime
-
-    hidden_tier_result = {"status": "skipped", "prediction": "error", "confidence_score": 0.0, "error_code": "SKIPPED", "fallback_to_tier2": True}
-    hidden_tier_prediction = "error"
-    hidden_tier_confidence = 0.0
-    hidden_tier_error_code = "SKIPPED"
-    hidden_tier_success = False
-    hidden_tier_override = False
-
-    # Only call Hidden Tier API if Tier 1 is clean AND valid face detected with good quality
-    if not should_skip_api and len(valid_faces) > 0:
-        largest_face = max(valid_faces, key=lambda f: f['box'][2] * f['box'][3])
-        x, y, w, h = largest_face['box']
-
-        if w < 60 or h < 60:
-            audit_log.append(f"[FILTER] Rejected: Face resolution ({w}x{h}) too low.")
-            raise RuntimeError(f"Error: Face resolution ({w}x{h}) is too low for forensic analysis. Minimum 60x60 required.")
-
-        # Silent API call - no error logging to audit_log, Tier 2 takes over on failure
-        hidden_tier_result = hidden_tier_analyzer.analyze(file_bytes, [])
-        hidden_tier_prediction = hidden_tier_result.get("prediction", "error")
-        hidden_tier_confidence = hidden_tier_result.get("confidence_score", 0.0)
-        hidden_tier_error_code = hidden_tier_result.get("error_code", "NONE")
-        hidden_tier_success = hidden_tier_result.get("status") == "success"
-
-        # Use Hidden Tier result silently - Tier 2 is fallback if it fails (no noise)
-        if hidden_tier_success and hidden_tier_error_code == "NONE" and not is_tier1_fake:
-            hidden_tier_override = True
-
     if is_anime:
         audit_log.append("[SCOPE GATE] No face detected. Falling back to full-image structural analysis.")
         # Fallback Square Center Crop
@@ -605,20 +571,13 @@ def predict_from_bytes(file_bytes):
     ensemble_fake_p = (fake_p * 0.7) + (freq_score * 0.2) + (edge_score * 0.1 ) 
     ensemble_real_p = 1.0 - ensemble_fake_p
 
-    # --- SOVEREIGN DECISION LOGIC (with Hidden Tier integration) ---
+    # --- SOVEREIGN DECISION LOGIC ---
     if is_tier1_fake:
         # Tier 1 detected fake via cryptographic/metadata evidence - override everything
         ensemble_score = 1.0
         verdict_label = "Fake"
         report = f"--- FINAL FORENSIC REPORT ---\nVERDICT: 100% FAKE\n\n"
         report += f"REASON: Undeniable Digital Evidence.\n{msg_1b if is_fake_1b else msg_1a}\n\nNote: Cryptographic manifest overrides pixel analysis."
-    elif hidden_tier_override:
-        # Hidden Tier provided definitive analysis - use it
-        ensemble_score = hidden_tier_confidence if hidden_tier_prediction == "Fake" else (1.0 - hidden_tier_confidence)
-        verdict_label = hidden_tier_prediction
-        report = f"--- FINAL FORENSIC REPORT ---\nVERDICT: {hidden_tier_prediction.upper()} ({hidden_tier_confidence:.1%})\n\n"
-        report += f"REASON: Hidden Tier advanced analysis determined this image is {hidden_tier_prediction.lower()}.\n"
-        report += f"Confidence Score: {hidden_tier_confidence:.1%}\n\nNote: Hidden Tier cryptographic and behavioral analysis overrides standard detection."
     else:
         # Standard Tier 2 analysis path (frequency/edge)
         ensemble_score = ensemble_fake_p
