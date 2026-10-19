@@ -46,6 +46,51 @@ function $(id) {
   return document.getElementById(id);
 }
 
+/**
+ * 🔥 Optimization: Frontend Image Resizer
+ * Resizes images to a maximum dimension (e.g., 1024px) before uploading.
+ * This prevents 502 Bad Gateway timeouts on Render/Vercel caused by large payloads.
+ */
+async function resizeImage(file, maxDimension = 1024) {
+  return new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        let width = img.width;
+        let height = img.height;
+
+        if (width > height) {
+          if (width > maxDimension) {
+            height *= maxDimension / width;
+            width = maxDimension;
+          }
+        } else {
+          if (height > maxDimension) {
+            width *= maxDimension / height;
+            height = maxDimension;
+          }
+        }
+
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0, width, height);
+
+        canvas.toBlob((blob) => {
+          resolve(new File([blob], file.name, {
+            type: 'image/jpeg',
+            lastModified: Date.now()
+          }));
+        }, 'image/jpeg', 0.9);
+      };
+      img.src = e.target.result;
+    };
+    reader.readAsDataURL(file);
+  });
+}
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -1309,7 +1354,7 @@ function initDashboard() {
               ensemble_score: item.details?.ensemble_score || item.confidence,
               forensic_profiles: item.details?.forensic_profiles || {},
               visual_data: item.details?.visual_data || {},
-              modelLoaded: item.details?.model_loaded === true || item.details?.modelLoaded === true
+              modelLoaded: item.details?.model_loaded || item.details?.modelLoaded || true
             };
           });
           
@@ -1432,9 +1477,15 @@ if (imgLoader) {
       neuralCard.style.display = "none";
     }
 
-    try {
-      // 🔥 Try to get the original raw File from IndexedDB to preserve metadata
-      const originalFile = await getOriginalFile();
+    // 🔥 FIX: Try to get the original raw File from IndexedDB to preserve metadata
+      let originalFile = await getOriginalFile();
+      
+      // 🔥 Optimization: Resize image if it's too large (> 1MB) to prevent 502 timeouts
+      if (originalFile && originalFile.size > 1024 * 1024) {
+        console.log(`[Optimizer] Resizing large file (${(originalFile.size / 1024 / 1024).toFixed(2)}MB) before upload.`);
+        originalFile = await resizeImage(originalFile, 1024);
+      }
+
       const data = await predictBinaryFile(originalFile || dataUrlToBlob(image), name);
       
       // 🔥 FIX: Stop animation safely
@@ -1487,7 +1538,7 @@ if (currentImg) currentImg.style.filter = "none";
         confidence = Math.max(0, Math.min(1, data.ensemble_score));
       }
       
-      const modelLoaded = data.model_loaded === true || data.modelLoaded === true;
+      const modelLoaded = Boolean(data.model_loaded || data.modelLoaded);
       const explanation = String(data.explanation || data.message || "Analysis complete.");
       const heatmap = data.heatmap ? (data.heatmap.startsWith("data:") ? data.heatmap : `data:image/jpeg;base64,${data.heatmap}`) : null;
       const id = data.scan_id || `scan_${Date.now()}_${Math.random().toString(16).slice(2)}`;

@@ -669,11 +669,10 @@ def _generate_heatmap(model, img_array, original_image_np, prediction_label):
         else: 
             conv_model = tf.keras.Model(model.inputs, model.get_layer(target_layer_name).output) 
         
-        # 3. Run Optimized Score-CAM Math 
+        # 3. Run True Score-CAM Math 
         activations = conv_model(img_array).numpy()[0] 
         variances = np.var(activations, axis=(0, 1)) 
-        # Reduction: Use 12 channels instead of 32 to fit within Vercel's 10s timeout
-        max_n = min(12, len(variances)) 
+        max_n = min(32, len(variances)) 
         top_k_indices = np.argsort(variances)[-max_n:] 
         input_shape = img_array.shape[1:3] 
         masked_images = [] 
@@ -685,8 +684,7 @@ def _generate_heatmap(model, img_array, original_image_np, prediction_label):
             upsampled = cv2.resize(norm_map, (input_shape[1], input_shape[0])) 
             masked_images.append(img_array[0] * np.expand_dims(upsampled, axis=-1)) 
             
-        # Predict all masks in a single batch
-        preds = model.predict(np.array(masked_images), batch_size=max_n, verbose=0) 
+        preds = model.predict(np.array(masked_images), batch_size=16, verbose=0) 
         scores = np.exp(1.0 - preds[:, 0]) / np.sum(np.exp(1.0 - preds[:, 0])) 
         heatmap = np.zeros(activations.shape[0:2], dtype=np.float32) 
         
