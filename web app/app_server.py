@@ -636,6 +636,7 @@ def _generate_heatmap(model, img_array, original_image_np, prediction_label):
     import tensorflow as tf 
     import cv2 
     import numpy as np 
+    import gc
 
     # RULE: If the image is Real, immediately return the untouched original photo 
     if prediction_label != "Fake": 
@@ -684,7 +685,8 @@ def _generate_heatmap(model, img_array, original_image_np, prediction_label):
             upsampled = cv2.resize(norm_map, (input_shape[1], input_shape[0])) 
             masked_images.append(img_array[0] * np.expand_dims(upsampled, axis=-1)) 
             
-        preds = model.predict(np.array(masked_images), batch_size=16, verbose=0) 
+        # 🔥 Optimization: Process in smaller batches of 4 to avoid OOM on Render
+        preds = model.predict(np.array(masked_images), batch_size=4, verbose=0) 
         scores = np.exp(1.0 - preds[:, 0]) / np.sum(np.exp(1.0 - preds[:, 0])) 
         heatmap = np.zeros(activations.shape[0:2], dtype=np.float32) 
         
@@ -706,6 +708,10 @@ def _generate_heatmap(model, img_array, original_image_np, prediction_label):
  
         overlay_alpha = np.clip(hmap_3d * 0.67, 0, 1.0) 
         super_img = (original_image_np * (1.0 - overlay_alpha) + color_canvas * overlay_alpha).astype(np.uint8) 
+        
+        # Clean up memory explicitly
+        del masked_images, activations, scores, heatmap, heatmap_resized, heatmap_final, color_canvas
+        gc.collect()
         
         return super_img 
  
