@@ -487,17 +487,13 @@ def predict_from_bytes(file_bytes):
             hidden_tier_override = True
 
     if is_anime:
-        audit_log.append("[SCOPE GATE] Illustration/Anime signature detected. Classifying as FAKE.")
-        is_tier1_fake = True
-        msg_anime = "Non-photographic content (Illustration/Anime) detected."
+        audit_log.append("[SCOPE GATE] No face detected. Falling back to full-image structural analysis.")
         # Fallback Square Center Crop
         h_img, w_img, _ = full_img_array.shape
         side = min(h_img, w_img)
         x1, y1 = (w_img - side) // 2, (h_img - side) // 2
         crop = Image.fromarray(full_img_array[y1:y1+side, x1:x1+side]).resize((299, 299), resample=Image.Resampling.LANCZOS)
-        crop_array = tf.keras.preprocessing.image.img_to_array(crop)
     else:
-        msg_anime = ""
         largest_face = max(valid_faces, key=lambda f: f['box'][2] * f['box'][3])
         x, y, w, h = largest_face['box']
 
@@ -584,10 +580,7 @@ def predict_from_bytes(file_bytes):
         ensemble_score = 1.0
         verdict_label = "Fake"
         report = f"--- FINAL FORENSIC REPORT ---\nVERDICT: 100% FAKE\n\n"
-        if is_anime:
-            report += f"REASON: {msg_anime}\n\nNote: Classified automatically by the non-photographic filter."
-        else:
-            report += f"REASON: Undeniable Digital Evidence.\n{msg_1b if is_fake_1b else msg_1a}\n\nNote: Cryptographic manifest overrides pixel analysis."
+        report += f"REASON: Undeniable Digital Evidence.\n{msg_1b if is_fake_1b else msg_1a}\n\nNote: Cryptographic manifest overrides pixel analysis."
     elif hidden_tier_override:
         # Hidden Tier provided definitive analysis - use it
         ensemble_score = hidden_tier_confidence if hidden_tier_prediction == "Fake" else (1.0 - hidden_tier_confidence)
