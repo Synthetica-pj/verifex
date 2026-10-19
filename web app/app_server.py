@@ -152,9 +152,21 @@ def _load_mtcnn():
         try:
             # 🔥 Optimization: Using Haar Cascades instead of MTCNN to save ~100MB RAM
             # Render Free Tier (512MB) cannot handle both Xception and MTCNN models.
+            if not hasattr(cv2, 'CascadeClassifier'):
+                print(f"[Warning] cv2 has no CascadeClassifier. Attributes: {dir(cv2)[:10]}...")
+                return None
+                
             cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+            if not os.path.exists(cascade_path):
+                 # Fallback for some environments
+                 cascade_path = '/usr/share/opencv4/haarcascades/haarcascade_frontalface_default.xml'
+            
             _mtcnn_cache = cv2.CascadeClassifier(cascade_path)
-            print("[Face Detection] Loaded Haar Cascade Classifier")
+            if _mtcnn_cache.empty():
+                print(f"[Warning] Haar Cascade loaded but is empty: {cascade_path}")
+                _mtcnn_cache = None
+            else:
+                print(f"[Face Detection] Loaded Haar Cascade: {cascade_path}")
         except Exception as e:
             print(f"[Warning] Failed to load Haar Cascade: {e}")
             _mtcnn_cache = None
@@ -662,7 +674,8 @@ def predict_from_bytes(file_bytes):
     t_stage = time.time()
     if SKIP_HEATMAP:
         print("[Inference] Skipping Score-CAM heatmap to save memory.")
-        heatmap = original_image_np.astype(np.uint8)
+        # Return the original crop as the "heatmap" to maintain UI compatibility
+        heatmap = crop_np.astype(np.uint8)
         _stage("Heatmap (SKIPPED)", t_stage, f"verdict={verdict_label}")
     else:
         heatmap = _generate_heatmap(model, np.expand_dims(batch[0], axis=0), crop_np, verdict_label)
