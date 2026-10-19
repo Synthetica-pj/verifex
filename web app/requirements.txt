@@ -1,8 +1,5 @@
-opencv-python
-streamlit
-streamlit-image-comparison
-tensorflow
-keras
+opencv-python-headless
+tensorflow-cpu
 numpy
 scipy
 pillow
@@ -10,6 +7,3 @@ requests
 convex
 c2pa-python
 python-dotenv
-fastapi
-uvicorn
-python-multipart

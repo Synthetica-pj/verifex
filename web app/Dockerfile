@@ -4,6 +4,11 @@ FROM python:3.10-slim
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
+# 🔥 HARSH CPU/MEMORY CONSTRAINTS
+ENV OMP_NUM_THREADS=1
+ENV MKL_NUM_THREADS=1
+ENV TF_NUM_INTRAOP_THREADS=1
+ENV TF_NUM_INTEROP_THREADS=1
 
 # Install system dependencies with aggressive retries and mirror switching
 RUN apt-get update || (sed -i 's/deb.debian.org/ftp.us.debian.org/g' /etc/apt/sources.list && apt-get update) || (sed -i 's/ftp.us.debian.org/ftp.debian.org/g' /etc/apt/sources.list && apt-get update)

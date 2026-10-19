@@ -6,8 +6,6 @@ import mimetypes
 import os
 import threading
 import re
-import sys
-import types
 import cv2
 import numpy as np
 import gc
@@ -21,8 +19,6 @@ import io
 import time
 import uuid
 import random
-import urllib.request
-import urllib.error
 
 try:
     import resource  # Unix-only (present on Render); used for peak-memory logging
@@ -32,6 +28,20 @@ except ImportError:
 # ==========================================
 # PERFORMANCE INSTRUMENTATION
 # ==========================================
+# 🔥 HARSH MEMORY CONSTRAINTS FOR RENDER FREE TIER
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+os.environ['CUDA_VISIBLE_DEVICES'] = '-1'
+os.environ['TF_FORCE_GPU_ALLOW_GROWTH'] = 'false'
+os.environ['TF_XLA_FLAGS'] = '--tf_xla_cpu_global_jit=false'
+os.environ['TF_NUM_INTRAOP_THREADS'] = '1'
+os.environ['TF_NUM_INTEROP_THREADS'] = '1'
+
+# Global toggle for the heavy Score-CAM heatmap
+# On 512MB RAM, Score-CAM is the #1 cause of crashes.
+# We default to TRUE on Render (PORT=10000) to ensure stability.
+IS_RENDER = os.environ.get("PORT") == "10000"
+SKIP_HEATMAP = os.environ.get("SKIP_HEATMAP", "true" if IS_RENDER else "false").lower() == "true"
+
 def _peak_rss_mb():
     """Peak resident memory of this process in MB (-1 when unavailable, e.g. Windows)."""
     if resource is None:
@@ -124,6 +134,8 @@ def _load_model():
             if MODEL_PATH.exists():
                 t_load = time.time()
                 _model_cache = tf.keras.models.load_model(MODEL_PATH)
+                # 🔥 Optimization: Explicit GC after model load
+                gc.collect()
                 _stage("Model load", t_load, MODEL_PATH.name)
             else:
                 print(f"[Warning] Model file not found at {MODEL_PATH}")
@@ -523,8 +535,12 @@ def predict_from_bytes(file_bytes):
         np.clip(crop_array * 1.1, 0, 255)
     ]))
     
+    # 🔥 Optimization: Explicit GC before heavy prediction
+    gc.collect()
+
     t_stage = time.time()
-    preds = model.predict(batch, verbose=0)
+    # 🔥 Optimization: Predict in batch_size=1 to avoid peak memory spikes
+    preds = model.predict(batch, batch_size=1, verbose=0)
     real_p = float(np.mean(preds[:, 0]))
     fake_p = 1.0 - real_p
     _stage("TIER2 Xception predict (TTA x3)", t_stage, f"fake_p={fake_p:.3f}")
@@ -644,8 +660,13 @@ def predict_from_bytes(file_bytes):
     # Generate heatmap overlaid on the cropped face image
     # We pass the preprocessed crop as img_array and the clean crop_np as the base for overlay
     t_stage = time.time()
-    heatmap = _generate_heatmap(model, np.expand_dims(batch[0], axis=0), crop_np, verdict_label)
-    _stage("Heatmap (Score-CAM)", t_stage, f"verdict={verdict_label}")
+    if SKIP_HEATMAP:
+        print("[Inference] Skipping Score-CAM heatmap to save memory.")
+        heatmap = original_image_np.astype(np.uint8)
+        _stage("Heatmap (SKIPPED)", t_stage, f"verdict={verdict_label}")
+    else:
+        heatmap = _generate_heatmap(model, np.expand_dims(batch[0], axis=0), crop_np, verdict_label)
+        _stage("Heatmap (Score-CAM)", t_stage, f"verdict={verdict_label}")
 
     # ===== CONFIDENCE SCORE EXPLANATION =====
     # The confidence value represents the CERTAINTY of the prediction, not just "realness":
