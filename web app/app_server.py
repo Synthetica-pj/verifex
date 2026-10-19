@@ -136,14 +136,15 @@ def _load_model():
 _mtcnn_cache = None
 def _load_mtcnn():
     global _mtcnn_cache
-    if _import_tensorflow() is None:
-        return None
     if _mtcnn_cache is None:
         try:
-            from mtcnn import MTCNN
-            _mtcnn_cache = MTCNN()
-        except ImportError:
-            print("[Warning] MTCNN not found. Face detection will be limited.")
+            # 🔥 Optimization: Using Haar Cascades instead of MTCNN to save ~100MB RAM
+            # Render Free Tier (512MB) cannot handle both Xception and MTCNN models.
+            cascade_path = cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+            _mtcnn_cache = cv2.CascadeClassifier(cascade_path)
+            print("[Face Detection] Loaded Haar Cascade Classifier")
+        except Exception as e:
+            print(f"[Warning] Failed to load Haar Cascade: {e}")
             _mtcnn_cache = None
     return _mtcnn_cache
 
@@ -402,29 +403,30 @@ def predict_from_bytes(file_bytes):
     image_pil = Image.open(io.BytesIO(file_bytes)).convert('RGB')
     # 1. Fix EXIF Orientation Before Processing
     image_pil = ImageOps.exif_transpose(image_pil)
+    
+    # 🔥 Optimization: Aggressive thumbnailing to save memory (Render 512MB limit)
+    # 1024x1024 is the max we allow to avoid OOM during numpy conversion
+    image_pil.thumbnail((1024, 1024), Image.Resampling.LANCZOS)
+    
     full_img_array = np.array(image_pil)
     _stage("IMAGE decode", t_stage, f"{full_img_array.shape[1]}x{full_img_array.shape[0]} px")
 
-    # --- MTCNN FACE DETECTION ---
+    # --- FACE DETECTION (Haar Cascade) ---
     t_stage = time.time()
     valid_faces = []
     if face_detector:
-        # 🔥 Optimization: Downscale image for MTCNN detection to save CPU/Time
-        # MTCNN is extremely slow on high-res images (0.1 CPU limit).
-        MAX_DETECTION_DIM = 640
-        h_orig, w_orig = full_img_array.shape[:2]
-        if max(h_orig, w_orig) > MAX_DETECTION_DIM:
-            scale = MAX_DETECTION_DIM / max(h_orig, w_orig)
-            small_img = cv2.resize(full_img_array, (int(w_orig * scale), int(h_orig * scale)))
-            faces = face_detector.detect_faces(small_img)
-            # Scale coordinates back to original size
-            for f in faces:
-                f['box'] = [int(coord / scale) for coord in f['box']]
-        else:
-            faces = face_detector.detect_faces(full_img_array)
+        gray = cv2.cvtColor(full_img_array, cv2.COLOR_RGB2GRAY)
+        # scaleFactor=1.1, minNeighbors=5 is standard for Haar
+        faces = face_detector.detectMultiScale(gray, 1.1, 5)
+        
+        # Convert to same format as MTCNN for downstream compatibility
+        for (x, y, w, h) in faces:
+            valid_faces.append({
+                'box': [int(x), int(y), int(w), int(h)],
+                'confidence': 1.0 # Haar doesn't provide confidence, so we treat as valid
+            })
             
-        valid_faces = [f for f in faces if f['confidence'] >= 0.75]
-    _stage("MTCNN detect_faces", t_stage, f"{len(valid_faces)} face(s)")
+    _stage("Face Detection (Haar)", t_stage, f"{len(valid_faces)} face(s)")
 
     is_anime = len(valid_faces) == 0
     is_tier1_fake = is_fake_1a or is_fake_1b
@@ -662,6 +664,13 @@ def predict_from_bytes(file_bytes):
     # =========================================
 
     _stage("TOTAL predict_from_bytes", t_total, f"verdict={verdict_label}")
+    
+    # 🔥 Aggressive memory cleanup after prediction
+    try:
+        tf.keras.backend.clear_session()
+        gc.collect()
+    except:
+        pass
 
     return {
         "prediction": verdict_label,

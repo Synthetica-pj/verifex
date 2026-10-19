@@ -7,13 +7,9 @@ numpy
 scipy
 pillow
 requests
-mtcnn
 convex
 c2pa-python
 python-dotenv
-torch
-torchvision
 fastapi
 uvicorn
 python-multipart
-
