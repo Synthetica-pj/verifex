@@ -97,15 +97,23 @@ CLERK_INJECT_PUBLISHABLE_KEY = True # Force injection for local dev
 # can bind its port immediately instead of blocking ~1 minute on the import.
 # None = not probed yet, True/False = probed result.
 HAS_TENSORFLOW = None
+WARMUP_IN_PROGRESS = False
+CONVEX_UPLOAD_SEMAPHORE = threading.Semaphore(1)
 
 # ==========================================
 # MISSING HELPER FUNCTIONS
 # ==========================================
-def _import_tensorflow():
+def _import_tensorflow(allow_block=True):
     """Probe for TensorFlow once, on first use, and cache the result."""
-    global HAS_TENSORFLOW
+    global HAS_TENSORFLOW, WARMUP_IN_PROGRESS
     if HAS_TENSORFLOW is None:
+        # If warmup is already running and we aren't allowed to block (e.g. inside a request)
+        # then we return None to force a mock fallback instead of a 502 timeout.
+        if not allow_block and WARMUP_IN_PROGRESS:
+            return None
+            
         try:
+            WARMUP_IN_PROGRESS = True
             t_import = time.time()
             import tensorflow  # noqa: F401
             HAS_TENSORFLOW = True
@@ -113,6 +121,9 @@ def _import_tensorflow():
         except ImportError as e:
             HAS_TENSORFLOW = False
             print(f"[Warning] TensorFlow not found ({e}). Switching to Inference Mock mode.")
+        finally:
+            WARMUP_IN_PROGRESS = False
+            
     if not HAS_TENSORFLOW:
         return None
     import tensorflow as tf
@@ -123,9 +134,9 @@ def _import_tensorflow():
     return tf
 
 _model_cache = None
-def _load_model():
+def _load_model(allow_block=True):
     global _model_cache
-    if _import_tensorflow() is None:
+    if _import_tensorflow(allow_block=allow_block) is None:
         return None
     if _model_cache is None:
         try:
@@ -403,18 +414,29 @@ def _predict_mock(file_bytes, audit_log):
 def predict_from_bytes(file_bytes):
     t_total = time.time()
     print(f"[PERF] ==== PREDICT START ==== upload {len(file_bytes) / 1024.0:.0f} KB | peak RSS {_peak_rss_mb():.0f} MB", flush=True)
-    tf = _import_tensorflow()
-    model = _load_model()
+    
+    # 🔥 Aggressive cleanup at start to clear any leaked memory from previous runs
+    gc.collect()
+    
+    # 🔥 Optimization: Don't block the first request on TF import if warmup is running.
+    # This prevents 502 Bad Gateway timeouts on Vercel/Render.
+    tf = _import_tensorflow(allow_block=False)
+    model = _load_model(allow_block=False)
     face_detector = _load_mtcnn()
     
     audit_log = ["[START] Triple-Tier Forensic Interrogation initiated."]
 
     # If TensorFlow is missing, we use the "Inference Mock" engine
     if tf is None or model is None:
-        audit_log.append("[SYSTEM] TensorFlow or Model not found. Falling back to Inference Mock engine.")
+        audit_log.append("[SYSTEM] Neural runtime not ready or unavailable. Falling back to Inference Mock engine.")
         result = _predict_mock(file_bytes, audit_log)
         _stage("TOTAL predict_from_bytes (MOCK)", t_total)
-        return result
+        # Return raw bytes in a tuple to avoid base64 decoding in the background thread
+        return result, {
+            "crop": base64.b64decode(result['crop_image']),
+            "heatmap": base64.b64decode(result['heatmap']),
+            "original": file_bytes
+        }
     
     # --- TIER 1: SUPREME PRIORITY ---
     t_stage = time.time()
@@ -551,6 +573,11 @@ def predict_from_bytes(file_bytes):
     preds = model.predict(batch, batch_size=1, verbose=0)
     real_p = float(np.mean(preds[:, 0]))
     fake_p = 1.0 - real_p
+    
+    # 🔥 Cleanup batch immediately after prediction
+    del batch, preds
+    gc.collect()
+    
     _stage("TIER2 Xception predict (TTA x3)", t_stage, f"fake_p={fake_p:.3f}")
     audit_log.append(f"[TIER 2] AI Structural Analysis complete ({fake_p:.1%} suspect).")
 
@@ -567,6 +594,10 @@ def predict_from_bytes(file_bytes):
     edge_score = analyze_edge_consistency(crop_array)['edge_score']
     
     audit_log.append(f"[MATH] Freq Peak Score: {freq_score:.2f} | Edge Aberration: {edge_score:.2f}")
+    
+    # 🔥 Cleanup crop_array after mathematical analysis
+    del crop_array
+    gc.collect()
     
     # --- TRADITIONAL ENSEMBLE --- 
     # Weight the scores (AI is primary 70%, Freq is 20%, Edge is 10%) 
@@ -671,7 +702,12 @@ def predict_from_bytes(file_bytes):
         heatmap = crop_np.astype(np.uint8)
         _stage("Heatmap (SKIPPED)", t_stage, f"verdict={verdict_label}")
     else:
-        heatmap = _generate_heatmap(model, np.expand_dims(batch[0], axis=0), crop_np, verdict_label)
+        # Re-create preprocessed crop just for heatmap to keep original code working
+        # but inside a restricted scope
+        temp_crop_batch = tf.keras.applications.xception.preprocess_input(np.expand_dims(tf.keras.preprocessing.image.img_to_array(crop), axis=0))
+        heatmap = _generate_heatmap(model, temp_crop_batch, crop_np, verdict_label)
+        del temp_crop_batch
+        gc.collect()
         _stage("Heatmap (Score-CAM)", t_stage, f"verdict={verdict_label}")
 
     # ===== CONFIDENCE SCORE EXPLANATION =====
@@ -692,6 +728,10 @@ def predict_from_bytes(file_bytes):
 
     _stage("TOTAL predict_from_bytes", t_total, f"verdict={verdict_label}")
     
+    # Prepare encoded versions for JSON response
+    heatmap_b64 = _encode_image_base64(heatmap)
+    original_b64 = _encode_image_base64(full_img_array)
+
     # 🔥 Aggressive memory cleanup after prediction
     try:
         tf.keras.backend.clear_session()
@@ -699,16 +739,16 @@ def predict_from_bytes(file_bytes):
     except:
         pass
 
-    return {
+    result = {
         "prediction": verdict_label,
         "confidence": float(round(ensemble_score if verdict_label == "Fake" else 1.0 - ensemble_score, 4)),
         "ensemble_score": float(round(ensemble_score, 4)),
         "threshold_used": 0.50,
         "model_loaded": True,
         "explanation": report,
-        "heatmap": _encode_image_base64(heatmap),
+        "heatmap": heatmap_b64,
         "crop_image": crop_base64,
-        "originalImage": f"data:image/jpeg;base64,{original_base64}",
+        "originalImage": f"data:image/jpeg;base64,{original_b64}",
         "visual_data": visual_data,
         "forensic_profiles": forensic_profiles,
         "debug_scores": {
@@ -723,6 +763,13 @@ def predict_from_bytes(file_bytes):
             "num_faces": len(valid_faces),
             "audit_log": "\n".join(audit_log)
         },
+    }
+    
+    # Return raw bytes in a tuple to avoid base64 decoding in the background thread
+    return result, {
+        "crop": base64.b64decode(crop_base64),
+        "heatmap": base64.b64decode(heatmap_b64),
+        "original": file_bytes
     }
 
 # ==========================================
@@ -842,9 +889,15 @@ def _parse_uploaded_file(content_type, body):
                 return filename, payload 
     raise RuntimeError("No uploaded file found in form data") 
 
-def _bg_upload_to_convex(user_id, scan_id, result, file_bytes):
+def _bg_upload_to_convex(user_id, scan_id, result, raw_data):
     """Background task to upload images and metadata to Convex without blocking the HTTP response."""
     if not convex_client or not user_id or user_id == "anonymous":
+        return
+
+    # 🔥 Optimization: Limit concurrent uploads to 1 to save memory on Render Free Tier
+    acquired = CONVEX_UPLOAD_SEMAPHORE.acquire(blocking=False)
+    if not acquired:
+        print(f"[Convex] Skipping background upload for {scan_id}: Another upload is in progress.")
         return
 
     try:
@@ -855,14 +908,9 @@ def _bg_upload_to_convex(user_id, scan_id, result, file_bytes):
         upload_url_heatmap = convex_client.mutation("scans:generateUploadUrl")
 
         # 2. Upload images to Convex File Storage
-        crop_bytes = base64.b64decode(result['crop_image'])
-        heatmap_bytes = base64.b64decode(result['heatmap'])
-        
-        if "originalImage" in result and result["originalImage"].startswith("data:"):
-             orig_base64 = result["originalImage"].split(",")[1]
-             original_bytes = base64.b64decode(orig_base64)
-        else:
-             original_bytes = file_bytes
+        crop_bytes = raw_data['crop']
+        heatmap_bytes = raw_data['heatmap']
+        original_bytes = raw_data['original']
 
         # Perform POST uploads
         res_img = requests.post(upload_url_image, data=crop_bytes, headers={"Content-Type": "image/jpeg"})
@@ -902,6 +950,11 @@ def _bg_upload_to_convex(user_id, scan_id, result, file_bytes):
         print(f"[Convex] Background upload complete for {scan_id}")
     except Exception as e:
         print(f"[Convex Error] {e}")
+    finally:
+        CONVEX_UPLOAD_SEMAPHORE.release()
+        # Aggressive cleanup
+        del raw_data
+        gc.collect()
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "VerifexHTTP/4.0-Integrated"
@@ -1137,7 +1190,7 @@ class Handler(BaseHTTPRequestHandler):
                     user_id = match.group(1).decode("utf-8")
 
             filename, file_bytes = _parse_uploaded_file(content_type, body)
-            result = predict_from_bytes(file_bytes)
+            result, raw_data = predict_from_bytes(file_bytes)
             result["filename"] = filename
             
             scan_id = "scan_" + str(uuid.uuid4())
@@ -1149,7 +1202,7 @@ class Handler(BaseHTTPRequestHandler):
             if convex_client and user_id and user_id != "anonymous":
                 threading.Thread(
                     target=_bg_upload_to_convex, 
-                    args=(user_id, scan_id, result, file_bytes),
+                    args=(user_id, scan_id, result, raw_data),
                     daemon=True
                 ).start()
 
@@ -1167,10 +1220,11 @@ def _warmup_runtime():
     """Load TensorFlow, the model and the face detector in the background."""
     t_warmup = time.time()
     try:
-        if _import_tensorflow() is None:
+        # allow_block=True is fine here because we are in a background thread
+        if _import_tensorflow(allow_block=True) is None:
             print("[Warmup] TensorFlow unavailable - running in Inference Mock mode.")
             return
-        _load_model()
+        _load_model(allow_block=True)
         _load_mtcnn()
         print("[Warmup] Neural runtime ready.")
     except Exception as e:
