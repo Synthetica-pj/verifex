@@ -1202,6 +1202,9 @@ function initDashboard() {
     if (currentMeta) currentMeta.textContent = `${item.name || "analysis_payload"}`;
     // Show actual scan_id, fallback to id if not available
     if ($("scanId")) $("scanId").textContent = `${item.scan_id || item.id}`;
+    // LOGIC: Always show the Heatmap in the right box if it exists.
+    // If no heatmap, fallback to the crop image.
+    const resultImage = item.heatmap || item.image;
     if (currentImg) {
       const orig = currentImg;
       orig.style.display = "none";
@@ -1210,8 +1213,6 @@ function initDashboard() {
         orig.previousElementSibling.innerHTML = "<span>Loading...</span>";
       }
       
-      // LOGIC: Show Heatmap for FAKE, show forensic crop for REAL
-      const resultImage = item.prediction === "Fake" ? item.heatmap : item.image;
       orig.src = resultImage || ""; 
       orig.style.filter = "none";
     }
@@ -1309,7 +1310,7 @@ function initDashboard() {
               ensemble_score: item.details?.ensemble_score || item.confidence,
               forensic_profiles: item.details?.forensic_profiles || {},
               visual_data: item.details?.visual_data || {},
-              modelLoaded: item.details?.model_loaded || item.details?.modelLoaded || true
+              modelLoaded: item.details?.model_loaded === true || item.details?.modelLoaded === true
             };
           });
           
@@ -1487,7 +1488,7 @@ if (currentImg) currentImg.style.filter = "none";
         confidence = Math.max(0, Math.min(1, data.ensemble_score));
       }
       
-      const modelLoaded = Boolean(data.model_loaded || data.modelLoaded);
+      const modelLoaded = data.model_loaded === true || data.modelLoaded === true;
       const explanation = String(data.explanation || data.message || "Analysis complete.");
       const heatmap = data.heatmap ? (data.heatmap.startsWith("data:") ? data.heatmap : `data:image/jpeg;base64,${data.heatmap}`) : null;
       const id = data.scan_id || `scan_${Date.now()}_${Math.random().toString(16).slice(2)}`;
