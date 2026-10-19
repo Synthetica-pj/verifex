@@ -10,6 +10,7 @@ import sys
 import types
 import cv2
 import numpy as np
+import gc
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -684,7 +685,7 @@ def _generate_heatmap(model, img_array, original_image_np, prediction_label):
             norm_map = (f_map - min_v) / (max_v - min_v + 1e-8) 
             upsampled = cv2.resize(norm_map, (input_shape[1], input_shape[0])) 
             masked_images.append(img_array[0] * np.expand_dims(upsampled, axis=-1)) 
-            
+               
         # 🔥 Optimization: Process in smaller batches of 4 to avoid OOM on Render
         preds = model.predict(np.array(masked_images), batch_size=4, verbose=0) 
         scores = np.exp(1.0 - preds[:, 0]) / np.sum(np.exp(1.0 - preds[:, 0])) 
@@ -712,7 +713,7 @@ def _generate_heatmap(model, img_array, original_image_np, prediction_label):
         # Clean up memory explicitly
         del masked_images, activations, scores, heatmap, heatmap_resized, heatmap_final, color_canvas
         gc.collect()
-        
+      
         return super_img 
  
     except Exception as e: 
